@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from app.db.base import Base
 from app.db.session import engine
-from app.routes import bookings
+from app.routes import bookings, payments
 
 # Create tables for development
 Base.metadata.create_all(bind=engine)
@@ -9,6 +9,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="gotyolo-booking-system")
 
 app.include_router(bookings.router)
+app.include_router(payments.router)
 
 @app.get("/")
 async def root():
