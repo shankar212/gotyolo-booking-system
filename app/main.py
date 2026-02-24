@@ -9,6 +9,7 @@ Base.metadata.create_all(bind=engine)
 app = FastAPI(title="gotyolo-booking-system")
 
 app.include_router(bookings.router)
+app.include_router(bookings.booking_router)
 app.include_router(payments.router)
 
 @app.get("/")

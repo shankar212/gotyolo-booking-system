@@ -9,6 +9,7 @@ from app.models.enums import TripStatus, BookingState
 from app.schemas.booking import BookingCreate, BookingResponse
 
 router = APIRouter(prefix="/trips", tags=["bookings"])
+booking_router = APIRouter(prefix="/bookings", tags=["bookings"])
 
 @router.post("/{trip_id}/book", response_model=BookingResponse, status_code=status.HTTP_201_CREATED)
 def create_booking(
@@ -67,4 +68,71 @@ def create_booking(
         )
 
     # 7. Return booking details in response
+    return booking
+
+
+@booking_router.post("/{booking_id}/cancel", response_model=BookingResponse)
+def cancel_booking(
+    booking_id: UUID,
+    db: Session = Depends(get_db)
+):
+    # 1. Start a database transaction (handled by session)
+    # 2. Lock booking row using with_for_update()
+    booking = db.query(Booking).filter(Booking.id == booking_id).with_for_update().first()
+    
+    if not booking:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Booking not found"
+        )
+    
+    # 3. If booking.state is EXPIRED or CANCELLED → return 409
+    if booking.state in [BookingState.EXPIRED, BookingState.CANCELLED]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"Booking cannot be cancelled in its current state: {booking.state}"
+        )
+    
+    # 4. Lock associated Trip row
+    trip = db.query(Trip).filter(Trip.id == booking.trip_id).with_for_update().first()
+    if not trip:
+        # This shouldn't happen based on DB constraints, but safety first
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated trip not found"
+        )
+    
+    # 5. Determine cutoff
+    cutoff_date = trip.start_date - timedelta(days=trip.refundable_until_days_before)
+    now = datetime.utcnow()
+    
+    # 6. If current time is before cutoff
+    if now < cutoff_date:
+        # refund_amount = price_at_booking * (1 - cancellation_fee_percent/100)
+        refund_percent = 1 - (trip.cancellation_fee_percent / 100.0)
+        booking.refund_amount = booking.price_at_booking * refund_percent
+        # release seats back to trip
+        trip.available_seats += booking.num_seats
+    else:
+        # 7. If current time is after cutoff
+        booking.refund_amount = 0
+        # do not release seats (implied by doing nothing)
+    
+    # 8. Update booking.state to CANCELLED
+    booking.state = BookingState.CANCELLED
+    
+    # 9. Set cancelled_at timestamp
+    booking.cancelled_at = now
+    
+    # 10. Commit transaction
+    try:
+        db.commit()
+        db.refresh(booking)
+    except Exception as e:
+        db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="An error occurred while cancelling the booking"
+        )
+    
     return booking

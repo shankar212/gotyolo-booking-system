@@ -1,3 +1,4 @@
+from typing import Optional
 from uuid import UUID
 from datetime import datetime
 from decimal import Decimal
@@ -16,6 +17,8 @@ class BookingResponse(BaseModel):
     state: BookingState
     price_at_booking: Decimal
     expires_at: datetime
+    refund_amount: Optional[Decimal] = None
+    cancelled_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
