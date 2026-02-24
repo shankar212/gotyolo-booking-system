@@ -10,43 +10,59 @@ The gotyolo-booking-system is a high-concurrency backend service for the GoTyolo
 - **APScheduler**: Manages background tasks, specifically the automated expiration of unpaid bookings.
 - **Docker + Docker Compose**: Orchestrates the application and database services, ensuring environment consistency and simplified deployment.
 
-## Architecture Overview
-The system implements a strict state machine for booking lifecycles:
-`PENDING_PAYMENT` → `CONFIRMED` → `CANCELLED` | `EXPIRED`
+## Engineering Design & Concurrency Strategy
 
-### Core Principles
-- **Transaction Boundaries**: Every critical operation (booking, payment, cancellation) is executed within a database transaction to ensure atomicity.
-- **Row-Level Locking**: High-concurrency endpoints utilize `SELECT ... FOR UPDATE` to lock specific trip or booking rows, preventing race conditions during status updates or seat decrements.
-- **Idempotency**: Webhook handlers use idempotency keys to ensure payment processing is performed exactly once, even in the event of provider retries.
-- **Error Differentiation**: The booking endpoint differentiates between non-existent trips (404) and unpublished trips (400), improving API correctness and observability.
-- **Background Processes**: An automated job monitors the `expires_at` timestamp for `PENDING_PAYMENT` bookings, transitioning them to `EXPIRED` and releasing seats back to the trip inventory if payment is not confirmed within 15 minutes.
+### Booking Lifecycle & State Transitions
+The booking system is modeled as a controlled state machine. Each booking moves through clearly defined states to ensure predictable behavior and prevent invalid transitions.
 
-## Concurrency & Overbooking Prevention
-The system prevents overselling by performing seat availability checks inside a locked transaction. When a booking request arrives:
-1. The relevant Trip row is locked (`FOR UPDATE`).
-2. `available_seats` is verified against the requested amount.
-3. If sufficient, the record is updated in the same transaction.
+**Booking States**
+- `PENDING_PAYMENT`: Initial state upon creation. Seats are reserved.
+- `CONFIRMED`: Payment is successfully completed.
+- `EXPIRED`: Payment failed or was not completed within the 15-minute window.
+- `CANCELLED`: The booking is cancelled by the user.
 
-Seat decrement and booking creation occur within the same database transaction to guarantee atomicity.
+**Valid Transitions**
+- `PENDING_PAYMENT` → `CONFIRMED` (on payment success)
+- `PENDING_PAYMENT` → `EXPIRED` (on payment failure or timeout)
+- `CONFIRMED` → `CANCELLED` (user cancellation)
+- `PENDING_PAYMENT` → `CANCELLED` (if allowed before confirmation)
 
-Under high load (e.g., 500 simultaneous requests for the same trip), PostgreSQL serializes access to the locked row. While this ensures zero overbooking, the database lock wait becomes a performance bottleneck for that specific row. Scaling strategies include increasing connection pool limits, horizontal application scaling, or isolating hot trips via sharding or queue-based reservation systems.
+All state transitions are validated at the service layer. Once a booking reaches `CANCELLED` or `EXPIRED`, it is in a terminal state and cannot transition further.
 
-## Refund & Cancellation Logic
-Cancellations are governed by trip-specific policies:
-- **refundable_until_days_before**: This parameter defines the cutoff date for refunds.
-- **cancellation_fee_percent**: If cancelled before the cutoff, the refund is calculated as `price * (1 - fee%)`.
-- **Seat Release**: Seats are released back to the `available_seats` pool only if the cancellation occurs before the refundable cutoff. After this period, the seat remains occupied even if the booking is cancelled.
+### Concurrency Strategy (Overbooking Prevention)
+To prevent overbooking when multiple users attempt to book the last remaining seats simultaneously, the system employs database-level row locking.
 
-## Admin Metrics
-Dedicated administrative endpoints provide real-time insights:
-- **Financial Aggregation**: Calculates Gross Revenue, Refunds, and Net Revenue at the database level using SQLAlchemy functional aggregations.
-- **At-Risk Detection**: Identifies trips starting within 7 days that have less than 50% occupancy, allowing for proactive marketing or operations interventions.
-- **Booking Summaries**: Provides a distribution of booking states for each trip.
+During booking creation:
+1. A database transaction is initiated.
+2. The relevant trip row is fetched using `SELECT ... FOR UPDATE`.
+3. Seat availability is verified.
+4. If available:
+    - The `available_seats` count is decremented.
+    - A booking record is created in the `PENDING_PAYMENT` state.
+5. The transaction is committed.
 
-## Denormalization Justification
-The `available_seats` field is denormalized on the `Trip` table for performance. Calculating availability in real-time by summing confirmed/pending bookings across millions of records is computationally expensive for every request.
-- **Risk**: Potential drift between the trip count and the sum of bookings.
-- **Mitigation**: Consistency is maintained through strict transaction boundaries and row-level locking. The seat count is modified only in the same transaction that creates or expires a booking.
+Pessimistic locking ensures that concurrent transactions must wait for the lock to be released, guaranteeing that seat counts never drop below zero.
+
+### Database Transactions
+Transactions are used to guarantee atomicity and consistency in all operations modifying seat inventory or booking states:
+
+- **Booking Creation**: Atomic locking, validation, seat decrement, and record insertion.
+- **Payment Webhook Processing**: Idempotency key validation, booking row locking, state update, and seat release on failure.
+- **Cancellation**: Dual-locking (Booking and Trip), transition validation, refund calculation, and state update.
+- **Auto-Expiry**: Atomic marking as `EXPIRED` and seat release.
+
+### Auto-Expiry Mechanism
+A lightweight background scheduler runs at fixed intervals (every minute) to keep the system state clean and metrics accurate.
+- **Identification**: Selects bookings in `PENDING_PAYMENT` state where `expires_at` is in the past.
+- **Execution**: Marks bookings as `EXPIRED` and releases reserved seats back to the trip inventory within a single transaction.
+
+### Trade-offs & Design Decisions
+
+#### Pessimistic vs. Optimistic Locking
+Pessimistic row-level locking is chosen over optimistic strategies because seat allocation is highly contention-prone. This approach prioritizes correctness and simplifies recovery logic, avoiding complex retry mechanisms.
+
+#### Denormalization Justification
+The `Trip` model stores a denormalized `available_seats` field. This allows for constant-time availability checks and faster booking validation, avoiding expensive aggregation queries on the bookings table. Consistency is maintained by ensuring all seat updates occur within locked transactions, backed by a database constraint that prevents `available_seats` from becoming negative.
 
 ## Setup Instructions
 ### Deployment
