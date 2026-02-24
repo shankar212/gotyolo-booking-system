@@ -21,11 +21,18 @@ def create_booking(
     # 2. Fetch the Trip row using SELECT FOR UPDATE
     trip = db.query(Trip).filter(Trip.id == trip_id).with_for_update().first()
 
-    # 3. If trip does not exist or status is not PUBLISHED → return 404
-    if not trip or trip.status != TripStatus.PUBLISHED:
+    # 3. Check existence first (404)
+    if not trip:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Trip not found or not published"
+            detail="Trip not found"
+        )
+
+    # 4. Check status second (400)
+    if trip.status != TripStatus.PUBLISHED:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Trip is not published"
         )
 
     # 4. If available_seats < num_seats → return 409 Conflict

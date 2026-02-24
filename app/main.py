@@ -1,4 +1,6 @@
 from fastapi import FastAPI
+from app.models.trip import Trip
+from app.models.booking import Booking
 from app.db.base import Base
 from app.db.session import engine
 from apscheduler.schedulers.background import BackgroundScheduler
