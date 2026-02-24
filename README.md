@@ -18,6 +18,7 @@ The system implements a strict state machine for booking lifecycles:
 - **Transaction Boundaries**: Every critical operation (booking, payment, cancellation) is executed within a database transaction to ensure atomicity.
 - **Row-Level Locking**: High-concurrency endpoints utilize `SELECT ... FOR UPDATE` to lock specific trip or booking rows, preventing race conditions during status updates or seat decrements.
 - **Idempotency**: Webhook handlers use idempotency keys to ensure payment processing is performed exactly once, even in the event of provider retries.
+- **Error Differentiation**: The booking endpoint differentiates between non-existent trips (404) and unpublished trips (400), improving API correctness and observability.
 - **Background Processes**: An automated job monitors the `expires_at` timestamp for `PENDING_PAYMENT` bookings, transitioning them to `EXPIRED` and releasing seats back to the trip inventory if payment is not confirmed within 15 minutes.
 
 ## Concurrency & Overbooking Prevention
@@ -26,7 +27,9 @@ The system prevents overselling by performing seat availability checks inside a 
 2. `available_seats` is verified against the requested amount.
 3. If sufficient, the record is updated in the same transaction.
 
-Under high load (e.g., 500 simultaneous requests for the same trip), PostgreSQL serializes access to the locked row. While this ensures zero overbooking, the database lock wait becomes a performance bottleneck for that specific row. Scaling considerations for higher loads include introducing a distributed caching layer or implementing a reservation-token mechanism to offload the primary database.
+Seat decrement and booking creation occur within the same database transaction to guarantee atomicity.
+
+Under high load (e.g., 500 simultaneous requests for the same trip), PostgreSQL serializes access to the locked row. While this ensures zero overbooking, the database lock wait becomes a performance bottleneck for that specific row. Scaling strategies include increasing connection pool limits, horizontal application scaling, or isolating hot trips via sharding or queue-based reservation systems.
 
 ## Refund & Cancellation Logic
 Cancellations are governed by trip-specific policies:
