@@ -15,10 +15,13 @@ class BookingResponse(BaseModel):
     user_id: UUID
     num_seats: int
     state: BookingState
-    price_at_booking: Decimal
+    price_at_booking: Decimal = Field(..., example="1200.00")
     expires_at: datetime
-    refund_amount: Optional[Decimal] = None
+    refund_amount: Optional[Decimal] = Field(None, example="0.00")
     cancelled_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
+        json_encoders = {
+            Decimal: lambda v: format(v, ".2f")
+        }

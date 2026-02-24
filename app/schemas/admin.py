@@ -1,12 +1,17 @@
 from uuid import UUID
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Dict, List
 from decimal import Decimal
 
 class FinancialMetrics(BaseModel):
-    gross_revenue: Decimal
-    refunds_issued: Decimal
-    net_revenue: Decimal
+    gross_revenue: Decimal = Field(..., example="1200.00")
+    refunds_issued: Decimal = Field(..., example="0.00")
+    net_revenue: Decimal = Field(..., example="1200.00")
+
+    class Config:
+        json_encoders = {
+            Decimal: lambda v: format(v, ".2f")
+        }
 
 class TripMetricsResponse(BaseModel):
     trip_id: UUID

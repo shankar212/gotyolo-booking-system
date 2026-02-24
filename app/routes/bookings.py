@@ -1,5 +1,6 @@
 from uuid import UUID
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 from app.db.session import get_db
@@ -83,7 +84,7 @@ def cancel_booking(
     booking_id: UUID,
     db: Session = Depends(get_db)
 ):
-    # 1. Start a database transaction (handled by session)
+    # 1. Start a database transaction
     # 2. Lock booking row using with_for_update()
     booking = db.query(Booking).filter(Booking.id == booking_id).with_for_update().first()
     
@@ -93,7 +94,7 @@ def cancel_booking(
             detail="Booking not found"
         )
     
-    # 3. If booking.state is EXPIRED or CANCELLED → return 409
+    # 3. Defensive checks for invalid states
     if booking.state in [BookingState.EXPIRED, BookingState.CANCELLED]:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -103,35 +104,35 @@ def cancel_booking(
     # 4. Lock associated Trip row
     trip = db.query(Trip).filter(Trip.id == booking.trip_id).with_for_update().first()
     if not trip:
-        # This shouldn't happen based on DB constraints, but safety first
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Associated trip not found"
         )
     
-    # 5. Determine cutoff
-    cutoff_date = trip.start_date - timedelta(days=trip.refundable_until_days_before)
-    now = datetime.utcnow()
+    # 5. Determine cutoff using timezone-aware datetimes
+    now = datetime.now(timezone.utc)
+    # Ensure trip.start_date is treated as utc if it's naive from DB
+    trip_start = trip.start_date.replace(tzinfo=timezone.utc) if trip.start_date.tzinfo is None else trip.start_date
+    cutoff_date = trip_start - timedelta(days=trip.refundable_until_days_before)
     
-    # 6. If current time is before cutoff
+    # 6. Refund and seat release logic
     if now < cutoff_date:
         # refund_amount = price_at_booking * (1 - cancellation_fee_percent/100)
         refund_percent = 1 - (trip.cancellation_fee_percent / 100.0)
-        booking.refund_amount = booking.price_at_booking * refund_percent
+        # Ensure we use high precision Decimal for calculation
+        booking.refund_amount = booking.price_at_booking * Decimal(str(refund_percent))
         # release seats back to trip
         trip.available_seats += booking.num_seats
     else:
-        # 7. If current time is after cutoff
-        booking.refund_amount = 0
-        # do not release seats (implied by doing nothing)
+        # If current time is after cutoff
+        booking.refund_amount = Decimal("0.00")
+        # do not release seats (implied)
     
-    # 8. Update booking.state to CANCELLED
+    # 7. Update booking state and timestamp
     booking.state = BookingState.CANCELLED
-    
-    # 9. Set cancelled_at timestamp
     booking.cancelled_at = now
     
-    # 10. Commit transaction
+    # 8. Commit transaction
     try:
         db.commit()
         db.refresh(booking)
